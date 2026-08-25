@@ -14,7 +14,7 @@
   const ROWS = 20;
   const TANK_SIZE = 28;
 
-  const BG_PATH = "assets/background.png";
+  const BG_PATH = "assets/wavepeak.png";
   const MAX_ACTIVE_ENEMIES = 5;
   const MAX_ALLIES = 2;
   const ALLY_RESPAWN_TIME = 18;
@@ -572,13 +572,16 @@
       glow: "#2ee2a5",
       type: "ally",
       shootTimer: 0.6 + Math.random() * 0.8,
-      pathTimer: 0.2 + Math.random() * 0.4,
+      pathTimer: 0.3 + Math.random() * 0.4,
       path: [],
       targetCell: null,
       hitFlash: 0,
       blocked: false,
       alive: true,
       respawnTimer: 0,
+      dirHoldTimer: 0,
+      lastTargetKey: "",
+      blockedCooldown: 0,
     };
   }
 
@@ -659,6 +662,90 @@
       enemy.path = [];
       enemy.pathTimer = 0;
       chooseEnemyDirection(enemy);
+    }
+  }
+
+  function followPathAlly(ally, dt) {
+    if (!ally.path.length) {
+      moveTank(ally, dt);
+      if (ally.blocked) {
+        chooseAllyDirection(ally);
+        moveTank(ally, dt);
+      }
+      return;
+    }
+
+    const next = ally.path[0];
+    const target = cellCenter(next.col, next.row);
+    const center = entityCenter(ally);
+    const dx = target.x - center.x;
+    const dy = target.y - center.y;
+
+    // 方向锁定：在短时间内不允许切换方向，防止抖动
+    if (ally.dirHoldTimer > 0) {
+      ally.dirHoldTimer -= dt;
+    }
+
+    // 到达路径点：跳过并继续处理下一个点（不 return，防止卡顿）
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) {
+      ally.path.shift();
+      if (!ally.path.length) return;
+    }
+
+    // 方向选择：使用阈值滞后(hysteresis)，防止 |dx|≈|dy| 时频繁翻转
+    const HYSTERESIS = 8;
+    if (ally.dirHoldTimer <= 0) {
+      let newDir;
+      if (Math.abs(dx) > Math.abs(dy) + HYSTERESIS) {
+        newDir = dx > 0 ? "right" : "left";
+      } else if (Math.abs(dy) > Math.abs(dx) + HYSTERESIS) {
+        newDir = dy > 0 ? "down" : "up";
+      } else {
+        // 差值在阈值内，保持当前方向
+        newDir = ally.dir;
+      }
+
+      if (newDir !== ally.dir) {
+        ally.dir = newDir;
+        ally.dirHoldTimer = 0.22;
+      }
+    }
+
+    moveTank(ally, dt);
+    if (ally.blocked) {
+      // 被阻挡时不清空路径，先尝试侧向移动
+      ally.blockedCooldown -= dt;
+      if (ally.blockedCooldown <= 0) {
+        ally.path = [];
+        ally.pathTimer = 0;
+        chooseAllyDirection(ally);
+        ally.blockedCooldown = 0.3;
+      }
+    }
+  }
+
+  function chooseAllyDirection(ally) {
+    const options = shuffle(["up", "down", "left", "right"]);
+    for (const key of options) {
+      const dir = DIRS[key];
+      const probe = rect(
+        ally.x + dir.x * 6,
+        ally.y + dir.y * 6,
+        ally.w,
+        ally.h
+      );
+      if (
+        probe.x >= 0 &&
+        probe.y >= PLAY_Y &&
+        probe.x + probe.w <= W &&
+        probe.y + probe.h <= PLAY_BOTTOM &&
+        !rectHitsObstacles(probe, false) &&
+        !rectHitsTanks(probe, ally)
+      ) {
+        ally.dir = key;
+        ally.dirHoldTimer = 0.2;
+        return;
+      }
     }
   }
 
@@ -979,6 +1066,7 @@
     ally.hitFlash = Math.max(0, ally.hitFlash - dt);
     ally.shootTimer -= dt;
     ally.pathTimer -= dt;
+    ally.blockedCooldown = Math.max(0, ally.blockedCooldown - dt);
 
     const target = nearestAliveEnemy();
     const targetCell = target
@@ -987,14 +1075,24 @@
         ? tankCell(player)
         : { col: 2, row: 17 };
 
-    if (ally.pathTimer <= 0 || ally.blocked || !ally.path.length) {
+    const targetKey = `${targetCell.col},${targetCell.row}`;
+
+    // 重规划条件：定时器到期 或 目标格子变了 或 路径为空
+    const needsRepath =
+      ally.pathTimer <= 0 ||
+      !ally.path.length ||
+      targetKey !== ally.lastTargetKey;
+
+    if (needsRepath) {
       ally.blocked = false;
       const current = tankCell(ally);
       ally.path = aStar(current.col, current.row, targetCell.col, targetCell.row, ally) || [];
-      ally.pathTimer = 0.45 + Math.random() * 0.55;
+      ally.lastTargetKey = targetKey;
+      ally.pathTimer = 0.8 + Math.random() * 0.6;
+      ally.dirHoldTimer = 0.15;
     }
 
-    followPath(ally, dt);
+    followPathAlly(ally, dt);
 
     if (target) {
       const ac = entityCenter(ally);
@@ -1443,6 +1541,12 @@
           ally.respawnTimer = 0;
           ally.x = 2 * CELL + 1;
           ally.y = PLAY_Y + 17 * CELL + 1;
+          ally.dir = "up";
+          ally.path = [];
+          ally.lastTargetKey = "";
+          ally.dirHoldTimer = 0.2;
+          ally.blockedCooldown = 0;
+          ally.pathTimer = 0.3;
           addShockwave(ally.x + ally.w / 2, ally.y + ally.h / 2, 30, ally.glow);
         }
       }
@@ -1540,8 +1644,11 @@
 
   function drawBackground() {
     if (bgReady && bgImage) {
+      ctx.save();
+      ctx.globalAlpha = 0.28;
       ctx.drawImage(bgImage, 0, 0, W, H);
-      ctx.fillStyle = "rgba(4, 22, 28, 0.12)";
+      ctx.restore();
+      ctx.fillStyle = "rgba(4, 22, 28, 0.18)";
       ctx.fillRect(0, 0, W, H);
       ctx.strokeStyle = "rgba(53, 213, 224, 0.08)";
       ctx.lineWidth = 1;
@@ -1624,8 +1731,18 @@
     }
   }
 
-  function drawTank(entity, bodyColor, glowColor, isPlayer = false) {
+  function drawTank(entity, bodyColor, glowColor, tankType) {
     if (!entity.alive) return;
+
+    // 阵营预设：玩家→金色，友军→蓝色，敌人→红色系
+    const presets = {
+      player: { body: "#ffd166", glow: "#ff9f1a", ring: "rgba(255, 180, 60, 0.35)", label: "P" },
+      ally:   { body: "#5bd7ff", glow: "#2aa8ff", ring: "rgba(91, 215, 255, 0.30)", label: "A" },
+      enemy:  { body: bodyColor, glow: glowColor, ring: "rgba(255, 90, 60, 0.25)", label: "" },
+    };
+    const preset = presets[tankType] || presets.enemy;
+    const isPlayer = tankType === "player";
+
     const nowMs = performance.now();
     const blink =
       isPlayer &&
@@ -1637,6 +1754,28 @@
     const cy = entity.y + entity.h / 2;
     const angle = DIRS[entity.dir].angle;
     const half = entity.w / 2;
+
+    // 阵营色环（在坦克下方，作为阵营标识）
+    if (tankType !== "enemy") {
+      glow(preset.ring.replace(/[\d.]+\)/, "0.45)"), 10);
+      ctx.strokeStyle = preset.ring;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, half + 4, 0, Math.PI * 2);
+      ctx.stroke();
+      resetGlow();
+    } else {
+      // 敌人：红色警示光圈
+      glow("#ff5a3c", 8);
+      ctx.strokeStyle = "rgba(255, 90, 60, 0.20)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, half + 5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      resetGlow();
+    }
 
     ctx.save();
     ctx.translate(cx, cy);
@@ -1651,11 +1790,12 @@
       ctx.fillRect(i * 4, half - 7, 3, 7);
     }
 
+    // 阵营配色渐变（中间深色区用阵营色调色）
     const bodyGradient = ctx.createLinearGradient(-half, -half, half, half);
-    bodyGradient.addColorStop(0, bodyColor);
-    bodyGradient.addColorStop(0.45, "#0f1b20");
-    bodyGradient.addColorStop(0.55, "#0f1b20");
-    bodyGradient.addColorStop(1, bodyColor);
+    bodyGradient.addColorStop(0, preset.body);
+    bodyGradient.addColorStop(0.42, "#0f1b20");
+    bodyGradient.addColorStop(0.58, "#0f1b20");
+    bodyGradient.addColorStop(1, preset.body);
     ctx.fillStyle = bodyGradient;
     ctx.beginPath();
     ctx.moveTo(-half + 2, -half + 5);
@@ -1665,33 +1805,67 @@
     ctx.closePath();
     ctx.fill();
 
-    glow(glowColor, 7);
-    ctx.strokeStyle = glowColor;
+    glow(preset.glow, 7);
+    ctx.strokeStyle = preset.glow;
     ctx.lineWidth = 1.5;
     ctx.stroke();
     resetGlow();
 
-    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
     ctx.fillRect(-half + 5, -half + 7, entity.w - 14, 3);
 
-    glow(glowColor, 12);
+    glow(preset.glow, 12);
     ctx.fillStyle = "#17262b";
     ctx.beginPath();
     ctx.arc(0, 0, 9, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = glowColor;
+    ctx.fillStyle = preset.glow;
     ctx.beginPath();
     ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
     ctx.fill();
     resetGlow();
 
+    // 炮管
     ctx.fillStyle = "#d6e8e8";
     ctx.fillRect(4, -3, 16, 6);
-    ctx.fillStyle = glowColor;
+    ctx.fillStyle = preset.glow;
     ctx.fillRect(16, -2, 8, 4);
+
+    // 阵营标识：玩家→星形，友军→三角/箭头
+    if (isPlayer) {
+      // 玩家：炮塔顶部绘制闪烁星标
+      glow(preset.glow, 10);
+      ctx.fillStyle = "#fff0c0";
+      ctx.beginPath();
+      const starR = 4 + Math.sin(gameTime * 8) * 0.8;
+      for (let i = 0; i < 5; i += 1) {
+        const a = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+        const px = Math.cos(a) * starR;
+        const py = Math.sin(a) * starR;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+        const a2 = a + Math.PI / 5;
+        ctx.lineTo(Math.cos(a2) * starR * 0.45, Math.sin(a2) * starR * 0.45);
+      }
+      ctx.closePath();
+      ctx.fill();
+      resetGlow();
+    } else if (tankType === "ally") {
+      // 友军：炮塔顶部绘制三角箭头
+      glow(preset.glow, 8);
+      ctx.fillStyle = "#a8e8ff";
+      ctx.beginPath();
+      ctx.moveTo(0, -5);
+      ctx.lineTo(4, 3);
+      ctx.lineTo(-4, 3);
+      ctx.closePath();
+      ctx.fill();
+      resetGlow();
+    }
 
     ctx.restore();
 
+    // 玩家护盾光环
     if (isPlayer && entity.shield > 0) {
       glow("#3ee0ff", 16);
       ctx.strokeStyle = `rgba(62, 224, 255, ${0.55 + Math.sin(gameTime * 6) * 0.25})`;
@@ -1700,6 +1874,21 @@
       ctx.arc(cx, cy, half + 8 + Math.sin(gameTime * 6) * 2, 0, Math.PI * 2);
       ctx.stroke();
       resetGlow();
+    }
+
+    // 玩家名称标签
+    if (isPlayer) {
+      ctx.fillStyle = "#ffe8a0";
+      ctx.font = "bold 9px 'Segoe UI', 'Microsoft YaHei', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText("玩家", cx, entity.y - 2);
+    } else if (tankType === "ally") {
+      ctx.fillStyle = "#b8ecff";
+      ctx.font = "bold 9px 'Segoe UI', 'Microsoft YaHei', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText("友军", cx, entity.y - 2);
     }
   }
 
@@ -2085,10 +2274,10 @@
     drawBase();
     drawPickups();
 
-    if (player) drawTank(player, "#3fd084", "#35e5a0", true);
+    if (player) drawTank(player, "#ffd166", "#ff9f1a", "player");
     allies.forEach((ally) => {
       if (ally.alive) {
-        drawTank(ally, ally.hitFlash > 0 ? "#fff0b0" : ally.color, ally.glow, false);
+        drawTank(ally, ally.hitFlash > 0 ? "#fff0b0" : ally.color, ally.glow, "ally");
         if (ally.hp < ally.maxHp) {
           const ratio = ally.hp / ally.maxHp;
           ctx.fillStyle = "#14231c";
@@ -2100,7 +2289,7 @@
     });
     enemies.forEach((enemy) => {
       if (enemy.alive) {
-        drawTank(enemy, enemy.hitFlash > 0 ? "#fff0b0" : enemy.color, enemy.glow, false);
+        drawTank(enemy, enemy.hitFlash > 0 ? "#fff0b0" : enemy.color, enemy.glow, "enemy");
         drawEnemyDetails(enemy);
       }
     });
