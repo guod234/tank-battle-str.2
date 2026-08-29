@@ -14,7 +14,6 @@
   const ROWS = 20;
   const TANK_SIZE = 28;
 
-  const BG_PATH = "assets/wavepeak.png";
   const MAX_ACTIVE_ENEMIES = 5;
   const MAX_ALLIES = 2;
   const ALLY_RESPAWN_TIME = 18;
@@ -165,9 +164,6 @@
   let floatTexts = [];
   let obstacleGrid = [];
 
-  let bgImage = null;
-  let bgReady = false;
-
   const audio = {
     ctx: null,
     enabled: true,
@@ -215,16 +211,6 @@
       this.tone(320, 55, 0.32, "sine", 0.05);
     },
   };
-
-  const bgLoader = new Image();
-  bgLoader.onload = () => {
-    bgImage = bgLoader;
-    bgReady = true;
-  };
-  bgLoader.onerror = () => {
-    bgReady = false;
-  };
-  bgLoader.src = BG_PATH;
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -1022,28 +1008,77 @@
     return best;
   }
 
-  function spawnAlly() {
-    if (allies.filter((ally) => ally.alive).length >= MAX_ALLIES) return;
+  function isCellFreeForTank(col, row) {
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return false;
+    const probe = rect(col * CELL + 1, PLAY_Y + row * CELL + 1, TANK_SIZE, TANK_SIZE);
+    return (
+      probe.x >= 0 &&
+      probe.y >= PLAY_Y &&
+      probe.x + probe.w <= W &&
+      probe.y + probe.h <= PLAY_BOTTOM &&
+      !rectHitsObstacles(probe, false) &&
+      !rectHitsTanks(probe, null)
+    );
+  }
+
+  function findAllySpawnCell() {
     const base = player ? tankCell(player) : { col: 2, row: 17 };
     const offsets = [
-      { col: 1, row: 0 },
-      { col: -1, row: 0 },
-      { col: 0, row: 1 },
-      { col: 0, row: -1 },
-      { col: 2, row: 0 },
-      { col: -2, row: 0 },
+      [0, -1],
+      [1, 0],
+      [0, 1],
+      [-1, 0],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+      [-1, -1],
+      [0, -2],
+      [2, 0],
+      [0, 2],
+      [-2, 0],
+      [2, -1],
+      [2, 1],
+      [-2, 1],
+      [-2, -1],
+      [1, -2],
+      [1, 2],
+      [-1, 2],
+      [-1, -2],
     ];
-    for (const offset of offsets) {
-      const col = clamp(base.col + offset.col, 0, COLS - 1);
-      const row = clamp(base.row + offset.row, 0, ROWS - 1);
-      if (!isCellBlockedForPath(col, row, null)) {
-        const ally = createAlly(col, row, "up");
-        allies.push(ally);
-        addShockwave(ally.x + ally.w / 2, ally.y + ally.h / 2, 34, ally.glow);
-        addFloatText(ally.x + ally.w / 2, ally.y - 12, "友军支援", "#5ee6a8");
-        return;
+
+    for (const [dc, dr] of offsets) {
+      const col = base.col + dc;
+      const row = base.row + dr;
+      if (isCellFreeForTank(col, row)) return { col, row };
+    }
+
+    for (let radius = 3; radius <= 6; radius += 1) {
+      for (let dc = -radius; dc <= radius; dc += 1) {
+        for (let dr = -radius; dr <= radius; dr += 1) {
+          if (Math.max(Math.abs(dc), Math.abs(dr)) !== radius) continue;
+          const col = base.col + dc;
+          const row = base.row + dr;
+          if (isCellFreeForTank(col, row)) return { col, row };
+        }
       }
     }
+
+    for (let col = 0; col < COLS; col += 1) {
+      for (let row = 0; row < ROWS; row += 1) {
+        if (isCellFreeForTank(col, row)) return { col, row };
+      }
+    }
+    return null;
+  }
+
+  function spawnAlly() {
+    if (allies.filter((ally) => ally.alive).length >= MAX_ALLIES) return;
+    const cell = findAllySpawnCell();
+    if (!cell) return;
+    const ally = createAlly(cell.col, cell.row, "up");
+    allies.push(ally);
+    addShockwave(ally.x + ally.w / 2, ally.y + ally.h / 2, 34, ally.glow);
+    addFloatText(ally.x + ally.w / 2, ally.y - 12, "友军支援", "#5ee6a8");
   }
 
   function damageAlly(ally, amount = 1) {
@@ -1539,8 +1574,9 @@
           ally.alive = true;
           ally.hp = ally.maxHp;
           ally.respawnTimer = 0;
-          ally.x = 2 * CELL + 1;
-          ally.y = PLAY_Y + 17 * CELL + 1;
+          const spawnCell = findAllySpawnCell();
+          ally.x = spawnCell ? spawnCell.col * CELL + 1 : 2 * CELL + 1;
+          ally.y = spawnCell ? PLAY_Y + spawnCell.row * CELL + 1 : PLAY_Y + 17 * CELL + 1;
           ally.dir = "up";
           ally.path = [];
           ally.lastTargetKey = "";
@@ -1642,31 +1678,81 @@
     }
   }
 
-  function drawBackground() {
-    if (bgReady && bgImage) {
-      ctx.save();
-      ctx.globalAlpha = 0.28;
-      ctx.drawImage(bgImage, 0, 0, W, H);
-      ctx.restore();
-      ctx.fillStyle = "rgba(4, 22, 28, 0.18)";
-      ctx.fillRect(0, 0, W, H);
-      ctx.strokeStyle = "rgba(53, 213, 224, 0.08)";
-      ctx.lineWidth = 1;
-      for (let x = 0; x <= W; x += CELL) {
-        ctx.beginPath();
-        ctx.moveTo(x, PLAY_Y);
-        ctx.lineTo(x, H);
-        ctx.stroke();
-      }
-      for (let y = PLAY_Y; y <= H; y += CELL) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(W, y);
-        ctx.stroke();
-      }
-    } else {
-      drawFallbackBackground();
+  // 程序化绘制"浪尖儿 WavePeak Elite"logo 水印（低透明度，不遮挡视野）
+  function drawWavepeakLogo() {
+    const playH = H - PLAY_Y;
+    const S = Math.min(playH * 0.86, 470);
+    const bcx = W / 2;
+    const bcy = PLAY_Y + playH / 2;
+
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+
+    // 柔和暗色衬底，提升 logo 存在感但不形成硬色块
+    const vignette = ctx.createRadialGradient(bcx, bcy, 0, bcx, bcy, S * 0.72);
+    vignette.addColorStop(0, "rgba(0, 0, 0, 0.55)");
+    vignette.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(bcx - S * 0.75, bcy - S * 0.75, S * 1.5, S * 1.5);
+
+    // ---- 波形喇叭图标 ----
+    const ox = bcx - S * 0.175; // 开口中心
+    const oy = bcy;
+    const rx = S * 0.032;
+    const ry = S * 0.128;
+    const tx = ox - S * 0.265; // 左侧尖端
+
+    const hornGrad = ctx.createLinearGradient(tx, oy + ry, ox, oy - ry);
+    hornGrad.addColorStop(0, "#1668d6");
+    hornGrad.addColorStop(0.45, "#2ab3e8");
+    hornGrad.addColorStop(0.78, "#86d322");
+    hornGrad.addColorStop(1, "#b8e62e");
+
+    ctx.beginPath();
+    ctx.moveTo(tx, oy);
+    ctx.bezierCurveTo(tx + S * 0.10, oy - S * 0.012, ox - S * 0.10, oy - ry, ox, oy - ry);
+    ctx.ellipse(ox, oy, rx, ry, 0, -Math.PI / 2, Math.PI / 2);
+    ctx.bezierCurveTo(ox - S * 0.10, oy + ry, tx + S * 0.10, oy + S * 0.012, tx, oy);
+    ctx.closePath();
+    ctx.fillStyle = hornGrad;
+    ctx.fill();
+    ctx.strokeStyle = hornGrad;
+    ctx.lineWidth = S * 0.006;
+    ctx.stroke();
+
+    // 开口内的同心圆环
+    ctx.lineWidth = S * 0.007;
+    const rings = [
+      { dx: S * 0.012, k: 0.72 },
+      { dx: S * 0.026, k: 0.52 },
+      { dx: S * 0.040, k: 0.34 },
+    ];
+    for (const ring of rings) {
+      ctx.beginPath();
+      ctx.ellipse(ox + ring.dx, oy, rx * 0.85, ry * ring.k, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = hornGrad;
+      ctx.stroke();
     }
+
+    // ---- 文字 ----
+    const tx2 = bcx + S * 0.025;
+    ctx.fillStyle = "#f4fbfb";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+
+    ctx.font = `bold ${Math.round(S * 0.118)}px 'Microsoft YaHei', 'PingFang SC', sans-serif`;
+    ctx.fillText("浪尖儿", tx2, bcy - S * 0.082);
+
+    ctx.font = `bold ${Math.round(S * 0.068)}px 'Segoe UI', Arial, sans-serif`;
+    ctx.fillText("WavePeak", tx2, bcy + 0.004 * S);
+    ctx.fillText("Elite", tx2, bcy + S * 0.078);
+
+    ctx.restore();
+  }
+
+  function drawBackground() {
+    drawFallbackBackground();
+    drawWavepeakLogo();
   }
 
   function glow(color, blur = 12) {
