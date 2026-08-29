@@ -2,6 +2,12 @@
 
 一个使用 HTML5 Canvas 实现的科幻风坦克大战附加题小游戏。无需安装依赖，直接运行即可开始游戏。
 
+## 在线访问
+
+已部署至 GitHub Pages，可直接访问：
+
+> **https://guod234.github.io/tank-battle-str.2/**
+
 ## 运行方式
 
 方式一：双击 `run.bat`。
